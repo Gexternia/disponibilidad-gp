@@ -22,11 +22,22 @@ const HOURS = [];
 for (let h = 9; h < 19; h++) HOURS.push(h);
 
 const FREE = "__free__";
-const CAL_EVENT = "__cal__";
 const TOTAL_SLOTS = DAYS.length * HOURS.length;
-
 const GRAPH_SCOPES = ["Calendars.Read"];
 const GRAPH_CALENDAR_URL = "https://graph.microsoft.com/v1.0/me/calendarView";
+
+const STATUS_MAP = {
+  pendiente: { label: "Pendiente", color: "#94A3B8", icon: "⬜" },
+  "en-progreso": { label: "En progreso", color: "#F59E0B", icon: "🔶" },
+  completada: { label: "Completada", color: "#10B981", icon: "✅" },
+  bloqueada: { label: "Bloqueada", color: "#EF4444", icon: "🔴" },
+};
+
+const PRIORITY_MAP = {
+  alta: { label: "Alta", color: "#EF4444", icon: "🔺" },
+  media: { label: "Media", color: "#F59E0B", icon: "🔸" },
+  baja: { label: "Baja", color: "#94A3B8", icon: "🔹" },
+};
 
 function getMonday(d) {
   const date = new Date(d);
@@ -45,23 +56,19 @@ function fmtRange(m) {
 function dayDate(m, i) { const d = new Date(m); d.setDate(d.getDate() + i); return d; }
 function pad(n) { return String(n).padStart(2, "0"); }
 function fmtHour(h) { return `${h}:00`; }
-
 function fmtOutlookDate(date, h, m) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(h)}:${pad(m)}:00`;
 }
-
 function defaultBlocks() {
   const b = {};
   DAYS.forEach(d => HOURS.forEach(h => b[`${d.key}_${h}`] = FREE));
   return b;
 }
-
 function joinNatural(items) {
   if (items.length === 0) return "";
   if (items.length === 1) return items[0];
   return items.slice(0, -1).join(", ") + " y " + items[items.length - 1];
 }
-
 function groupConsecutiveHours(hours) {
   if (hours.length === 0) return [];
   const sorted = [...hours].sort((a, b) => a - b);
@@ -74,7 +81,6 @@ function groupConsecutiveHours(hours) {
   ranges.push({ start, end: end + 1 });
   return ranges;
 }
-
 function describeRanges(ranges) {
   return ranges.map(r => {
     if (r.end - r.start === 1) return `${r.start}:00`;
@@ -82,7 +88,7 @@ function describeRanges(ranges) {
   });
 }
 
-function generateNaturalAvailability(blocks, clientId, clientName, weekRange) {
+function generateNaturalAvailability(blocks, clientId, clientName, weekRange, tasks) {
   const assignedByDay = {};
   const availableByDay = {};
 
@@ -102,7 +108,6 @@ function generateNaturalAvailability(blocks, clientId, clientName, weekRange) {
     const morningOnly = [];
     const afternoonOnly = [];
     const customDays = [];
-
     DAYS.forEach(d => {
       const hours = dayHoursMap[d.key];
       if (hours.length === 0) return;
@@ -116,7 +121,6 @@ function generateNaturalAvailability(blocks, clientId, clientName, weekRange) {
         else customDays.push({ day: d.label, ranges });
       }
     });
-
     if (fullDays.length > 0) parts.push(`${joinNatural(fullDays)} jornada completa (9:00–19:00)`);
     if (morningOnly.length > 0) parts.push(`${joinNatural(morningOnly)} por la mañana (9:00–14:00)`);
     if (afternoonOnly.length > 0) parts.push(`${joinNatural(afternoonOnly)} por la tarde (15:00–19:00)`);
@@ -129,17 +133,55 @@ function generateNaturalAvailability(blocks, clientId, clientName, weekRange) {
 
   const dedicationParts = describeDayHours(assignedByDay);
   const availParts = describeDayHours(availableByDay);
+  const totalAssigned = Object.values(assignedByDay).reduce((s, a) => s + a.length, 0);
+
+  const clientTasks = (tasks || []).filter(t => t.clientId === clientId && t.status !== "completada");
+  const activeTasks = clientTasks.filter(t => t.status === "en-progreso");
+  const pendingTasks = clientTasks.filter(t => t.status === "pendiente");
+
   let msg = `¡Buenas!\n\nOs paso mi disponibilidad para esta semana (${weekRange}).`;
-  if (dedicationParts.length > 0) msg += `\n\nEn principio, la dedicación al proyecto de ${clientName} será: ${joinNatural(dedicationParts)}.`;
-  if (availParts.length > 0) msg += `\n\nAparte de eso, tengo hueco libre ${joinNatural(availParts)}, por si necesitáis cuadrar alguna reunión o llamada extra.`;
-  else if (dedicationParts.length > 0) msg += `\n\nEl resto de la semana lo tengo comprometido con otros proyectos, así que si necesitáis algo fuera de esos bloques avisadme con tiempo e intentamos cuadrarlo.`;
-  if (dedicationParts.length === 0 && availParts.length > 0) msg += `\n\nEsta semana no tengo bloques fijos asignados al proyecto, pero estoy disponible ${joinNatural(availParts)}.`;
-  if (dedicationParts.length === 0 && availParts.length === 0) msg += `\n\nEsta semana la tengo bastante comprometida con otros proyectos. Si surge algo urgente escribidme e intentamos buscar un hueco.`;
-  msg += `\n\nPara cualquier reunión, enviadme la convocatoria por Outlook/Teams y la acepto directamente.\n\nUn saludo,\nGuillermo`;
+
+  if (dedicationParts.length > 0) {
+    msg += `\n\nLa dedicación prevista al proyecto será: ${joinNatural(dedicationParts)} (${totalAssigned}h en total).`;
+
+    if (activeTasks.length > 0 || pendingTasks.length > 0) {
+      msg += `\n\nDurante ese tiempo trabajaré en:`;
+      activeTasks.forEach(t => {
+        msg += `\n  • ${t.title} (~${t.estimatedHours}h) — en progreso`;
+      });
+      pendingTasks.forEach(t => {
+        msg += `\n  • ${t.title} (~${t.estimatedHours}h)`;
+      });
+      const totalTaskHours = clientTasks.reduce((s, t) => s + (t.estimatedHours || 0), 0);
+      if (totalTaskHours > totalAssigned) {
+        msg += `\n\n⚠️ Nota: las tareas suman ~${totalTaskHours}h pero tengo ${totalAssigned}h asignadas. Priorizaré por urgencia.`;
+      }
+    }
+  }
+
+  if (availParts.length > 0) {
+    msg += `\n\nAparte de eso, tengo hueco libre ${joinNatural(availParts)}, por si necesitáis cuadrar alguna reunión o llamada extra.`;
+  } else if (dedicationParts.length > 0) {
+    msg += `\n\nEl resto de la semana lo tengo comprometido con otros proyectos, así que si necesitáis algo fuera de esos bloques avisadme con tiempo.`;
+  }
+
+  if (dedicationParts.length === 0 && availParts.length > 0) {
+    msg += `\n\nEsta semana no tengo bloques fijos asignados, pero estoy disponible ${joinNatural(availParts)}.`;
+    if (clientTasks.length > 0) {
+      msg += ` Tengo pendiente trabajar en:`;
+      clientTasks.forEach(t => { msg += `\n  • ${t.title} (~${t.estimatedHours}h)`; });
+    }
+  }
+
+  if (dedicationParts.length === 0 && availParts.length === 0) {
+    msg += `\n\nEsta semana la tengo bastante comprometida. Si surge algo urgente escribidme.`;
+  }
+
+  msg += `\n\nPara cualquier reunión, enviadme la convocatoria por Outlook/Teams.\n\nUn saludo,\nGuillermo`;
   return msg;
 }
 
-function generateAdminSummary(blocks, clientMap, weekRange) {
+function generateAdminSummary(blocks, clientMap, weekRange, tasks) {
   let msg = `📅 Disponibilidad semana ${weekRange}\n\n`;
   DAYS.forEach(d => {
     const dayHours = {};
@@ -157,10 +199,22 @@ function generateAdminSummary(blocks, clientMap, weekRange) {
     });
     msg += "\n";
   });
+  if (tasks && tasks.length > 0) {
+    msg += "\n📋 Tareas de la semana:\n";
+    const byClient = {};
+    tasks.filter(t => t.status !== "completada").forEach(t => {
+      if (!byClient[t.clientId]) byClient[t.clientId] = [];
+      byClient[t.clientId].push(t);
+    });
+    Object.entries(byClient).forEach(([cId, ts]) => {
+      msg += `\n${clientMap[cId]?.icon || "📌"} ${clientMap[cId]?.short || cId}:\n`;
+      ts.forEach(t => { msg += `  ${STATUS_MAP[t.status]?.icon || "⬜"} ${t.title} (~${t.estimatedHours}h) — ${STATUS_MAP[t.status]?.label || t.status}\n`; });
+    });
+  }
   return msg;
 }
 
-function generateBlockingICS(blocks, clientId, monday, clientMap) {
+function generateBlockingICS(blocks, clientId, monday) {
   let ics = "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//Externia//Bloqueo//ES\nMETHOD:PUBLISH\nX-WR-TIMEZONE:Europe/Madrid\n";
   DAYS.forEach((d, di) => {
     HOURS.forEach(h => {
@@ -172,8 +226,7 @@ function generateBlockingICS(blocks, clientId, monday, clientMap) {
       }
     });
   });
-  ics += "END:VCALENDAR";
-  return ics;
+  ics += "END:VCALENDAR"; return ics;
 }
 
 function generateFullICS(blocks, monday, clientMap) {
@@ -189,8 +242,7 @@ function generateFullICS(blocks, monday, clientMap) {
       }
     });
   });
-  ics += "END:VCALENDAR";
-  return ics;
+  ics += "END:VCALENDAR"; return ics;
 }
 
 function downloadFile(content, filename, type) {
@@ -199,9 +251,7 @@ function downloadFile(content, filename, type) {
     const a = document.createElement("a");
     a.href = `data:${type};base64,${base64}`;
     a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
   } catch (e) { console.error("Download error:", e); }
 }
 
@@ -224,13 +274,9 @@ async function createMsal(clientId, redirectUri) {
   } catch (e) { console.error("MSAL init error:", e); return null; }
 }
 
-async function msalLogin(instance, loginHint) {
+async function msalLogin(instance) {
   try {
-    const resp = await instance.loginPopup({
-      scopes: GRAPH_SCOPES,
-      prompt: "select_account",
-      loginHint: loginHint || undefined,
-    });
+    const resp = await instance.loginPopup({ scopes: GRAPH_SCOPES, prompt: "select_account" });
     return resp.account;
   } catch (e) { console.error("Login error:", e); return null; }
 }
@@ -248,9 +294,7 @@ async function msalGetToken(instance, account) {
 }
 
 async function fetchCalendarEvents(token, startDate, endDate) {
-  const start = startDate.toISOString();
-  const end = endDate.toISOString();
-  const url = `${GRAPH_CALENDAR_URL}?startDateTime=${start}&endDateTime=${end}&$top=200&$select=subject,start,end,isAllDay,showAs,organizer&$orderby=start/dateTime`;
+  const url = `${GRAPH_CALENDAR_URL}?startDateTime=${startDate.toISOString()}&endDateTime=${endDate.toISOString()}&$top=200&$select=subject,start,end,isAllDay,showAs,organizer&$orderby=start/dateTime`;
   try {
     const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } });
     if (!resp.ok) throw new Error(`Graph API ${resp.status}`);
@@ -273,29 +317,17 @@ function parseEventsToSlots(events, monday) {
       });
       return;
     }
-
     const startLocal = new Date(ev.start.dateTime + (ev.start.timeZone === "UTC" ? "Z" : ""));
     const endLocal = new Date(ev.end.dateTime + (ev.end.timeZone === "UTC" ? "Z" : ""));
-
-    if (ev.start.timeZone === "UTC") {
-      startLocal.setTime(startLocal.getTime());
-      endLocal.setTime(endLocal.getTime());
-    }
-
     const startH = startLocal.getHours();
     const endH = endLocal.getMinutes() > 0 ? endLocal.getHours() + 1 : endLocal.getHours();
     const dayIdx = Math.round((new Date(startLocal.getFullYear(), startLocal.getMonth(), startLocal.getDate()) - monday) / 86400000);
     const day = DAYS[dayIdx];
     if (!day) return;
-
     for (let h = Math.max(startH, 9); h < Math.min(endH, 19); h++) {
       const key = `${day.key}_${h}`;
       if (!slots[key]) slots[key] = [];
-      slots[key].push({
-        subject: ev.subject,
-        start: `${pad(startLocal.getHours())}:${pad(startLocal.getMinutes())}`,
-        end: `${pad(endLocal.getHours())}:${pad(endLocal.getMinutes())}`,
-      });
+      slots[key].push({ subject: ev.subject, start: `${pad(startLocal.getHours())}:${pad(startLocal.getMinutes())}`, end: `${pad(endLocal.getHours())}:${pad(endLocal.getMinutes())}` });
     }
   });
   return slots;
@@ -304,7 +336,7 @@ function parseEventsToSlots(events, monday) {
 function Modal({ children, onClose }) {
   return (
     <div style={{ position:"fixed",inset:0,background:"rgba(15,23,42,0.5)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:100,backdropFilter:"blur(4px)" }} onClick={onClose}>
-      <div style={{ background:"white",borderRadius:20,padding:28,width:580,maxWidth:"92vw",maxHeight:"88vh",overflowY:"auto",boxShadow:"0 24px 64px rgba(0,0,0,0.15)" }} onClick={e => e.stopPropagation()}>
+      <div style={{ background:"white",borderRadius:20,padding:28,width:620,maxWidth:"92vw",maxHeight:"88vh",overflowY:"auto",boxShadow:"0 24px 64px rgba(0,0,0,0.15)" }} onClick={e => e.stopPropagation()}>
         {children}
       </div>
     </div>
@@ -325,7 +357,6 @@ function ClientManager({ clients, onSave, onClose }) {
   };
   const upd = (id, f, v) => setList(list.map(c => c.id === id ? { ...c, [f]: v } : c));
   const rm = (id) => { if (list.length <= 1) return; setList(list.filter(c => c.id !== id)); };
-
   return (
     <Modal onClose={onClose}>
       <div style={{ fontSize:18,fontWeight:700,color:"#1E293B",marginBottom:20 }}>Gestión de Clientes / Proyectos</div>
@@ -338,22 +369,8 @@ function ClientManager({ clients, onSave, onClose }) {
                   <input value={c.name} onChange={e => upd(c.id,"name",e.target.value)} placeholder="Nombre completo" style={{ flex:2,border:"2px solid #E2E8F0",borderRadius:8,padding:"8px 12px",fontSize:13,fontFamily:"inherit",outline:"none" }} />
                   <input value={c.short} onChange={e => upd(c.id,"short",e.target.value)} placeholder="Alias" style={{ flex:1,border:"2px solid #E2E8F0",borderRadius:8,padding:"8px 12px",fontSize:13,fontFamily:"inherit",outline:"none" }} />
                 </div>
-                <div>
-                  <div style={{ fontSize:11,fontWeight:600,color:"#94A3B8",marginBottom:6 }}>Color</div>
-                  <div style={{ display:"flex",gap:6,flexWrap:"wrap" }}>
-                    {PRESET_COLORS.map(col => (
-                      <div key={col} onClick={() => upd(c.id,"color",col)} style={{ width:28,height:28,borderRadius:8,background:col,cursor:"pointer",border:c.color===col?"3px solid #1E293B":"3px solid transparent" }} />
-                    ))}
-                  </div>
-                </div>
-                <div>
-                  <div style={{ fontSize:11,fontWeight:600,color:"#94A3B8",marginBottom:6 }}>Icono</div>
-                  <div style={{ display:"flex",gap:6,flexWrap:"wrap" }}>
-                    {PRESET_ICONS.map(ic => (
-                      <div key={ic} onClick={() => upd(c.id,"icon",ic)} style={{ width:32,height:32,borderRadius:8,background:c.icon===ic?"#E2E8F0":"transparent",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18 }}>{ic}</div>
-                    ))}
-                  </div>
-                </div>
+                <div><div style={{ fontSize:11,fontWeight:600,color:"#94A3B8",marginBottom:6 }}>Color</div><div style={{ display:"flex",gap:6,flexWrap:"wrap" }}>{PRESET_COLORS.map(col => (<div key={col} onClick={() => upd(c.id,"color",col)} style={{ width:28,height:28,borderRadius:8,background:col,cursor:"pointer",border:c.color===col?"3px solid #1E293B":"3px solid transparent" }} />))}</div></div>
+                <div><div style={{ fontSize:11,fontWeight:600,color:"#94A3B8",marginBottom:6 }}>Icono</div><div style={{ display:"flex",gap:6,flexWrap:"wrap" }}>{PRESET_ICONS.map(ic => (<div key={ic} onClick={() => upd(c.id,"icon",ic)} style={{ width:32,height:32,borderRadius:8,background:c.icon===ic?"#E2E8F0":"transparent",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18 }}>{ic}</div>))}</div></div>
                 <div style={{ display:"flex",justifyContent:"flex-end",gap:6,marginTop:4 }}>
                   <button onClick={() => rm(c.id)} style={{ background:"#FEE2E2",color:"#DC2626",border:"none",padding:"6px 14px",borderRadius:8,fontSize:12,fontWeight:600,cursor:"pointer" }}>Eliminar</button>
                   <button onClick={() => setEditing(null)} style={{ background:"#0F172A",color:"white",border:"none",padding:"6px 14px",borderRadius:8,fontSize:12,fontWeight:600,cursor:"pointer" }}>Listo</button>
@@ -361,13 +378,7 @@ function ClientManager({ clients, onSave, onClose }) {
               </div>
             ) : (
               <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer" }} onClick={() => setEditing(c.id)}>
-                <div style={{ display:"flex",alignItems:"center",gap:10 }}>
-                  <span style={{ fontSize:20 }}>{c.icon}</span>
-                  <div>
-                    <div style={{ fontSize:14,fontWeight:600,color:"#1E293B" }}>{c.name || "Sin nombre"}</div>
-                    <div style={{ fontSize:11,color:"#94A3B8" }}>{c.short || "Sin alias"}</div>
-                  </div>
-                </div>
+                <div style={{ display:"flex",alignItems:"center",gap:10 }}><span style={{ fontSize:20 }}>{c.icon}</span><div><div style={{ fontSize:14,fontWeight:600,color:"#1E293B" }}>{c.name||"Sin nombre"}</div><div style={{ fontSize:11,color:"#94A3B8" }}>{c.short||"Sin alias"}</div></div></div>
                 <span style={{ fontSize:12,color:"#94A3B8" }}>Editar →</span>
               </div>
             )}
@@ -375,10 +386,165 @@ function ClientManager({ clients, onSave, onClose }) {
         ))}
       </div>
       <div style={{ display:"flex",justifyContent:"space-between",marginTop:20 }}>
-        <button onClick={add} style={{ background:"#F1F5F9",color:"#475569",border:"none",padding:"10px 18px",borderRadius:10,fontSize:13,fontWeight:600,cursor:"pointer" }}>+ Añadir cliente</button>
+        <button onClick={add} style={{ background:"#F1F5F9",color:"#475569",border:"none",padding:"10px 18px",borderRadius:10,fontSize:13,fontWeight:600,cursor:"pointer" }}>+ Añadir</button>
         <button onClick={() => { onSave(list.filter(c => c.name.trim())); onClose(); }} style={{ background:"#0F172A",color:"white",border:"none",padding:"10px 24px",borderRadius:10,fontSize:13,fontWeight:600,cursor:"pointer" }}>Guardar</button>
       </div>
     </Modal>
+  );
+}
+
+function TaskPanel({ tasks, clients, clientMap, weekKey, onUpdate }) {
+  const [editingId, setEditingId] = useState(null);
+  const [filter, setFilter] = useState("all");
+  const [clientFilter, setClientFilter] = useState("all");
+
+  const weekTasks = tasks.filter(t => t.weekKey === weekKey);
+  const filtered = weekTasks.filter(t => {
+    if (filter !== "all" && t.status !== filter) return false;
+    if (clientFilter !== "all" && t.clientId !== clientFilter) return false;
+    return true;
+  });
+
+  const addTask = () => {
+    const nt = { id: `task_${Date.now()}`, title: "", clientId: clients[0]?.id || "", status: "pendiente", priority: "media", estimatedHours: 1, notes: "", weekKey };
+    onUpdate([...tasks, nt]);
+    setEditingId(nt.id);
+  };
+
+  const updateTask = (id, field, value) => {
+    onUpdate(tasks.map(t => t.id === id ? { ...t, [field]: value } : t));
+  };
+
+  const deleteTask = (id) => {
+    onUpdate(tasks.filter(t => t.id !== id));
+    if (editingId === id) setEditingId(null);
+  };
+
+  const duplicateToNextWeek = (task) => {
+    const nextMonday = new Date(weekKey);
+    nextMonday.setDate(nextMonday.getDate() + 7);
+    const nextKey = fmtWeekKey(nextMonday);
+    const nt = { ...task, id: `task_${Date.now()}`, weekKey: nextKey, status: "pendiente" };
+    onUpdate([...tasks, nt]);
+  };
+
+  const totalByClient = {};
+  weekTasks.filter(t => t.status !== "completada").forEach(t => {
+    totalByClient[t.clientId] = (totalByClient[t.clientId] || 0) + (t.estimatedHours || 0);
+  });
+
+  return (
+    <div style={{ background:"white",borderRadius:14,boxShadow:"0 1px 4px rgba(0,0,0,0.06)",border:"1px solid #E2E8F0",overflow:"hidden" }}>
+      <div style={{ padding:"14px 16px",borderBottom:"1px solid #E2E8F0",display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8 }}>
+        <div style={{ display:"flex",alignItems:"center",gap:8 }}>
+          <span style={{ fontSize:15,fontWeight:800,color:"#1E293B" }}>📋 Tareas de la semana</span>
+          <span style={{ fontSize:11,color:"#94A3B8",fontWeight:500 }}>{weekTasks.length} tareas · {weekTasks.filter(t=>t.status!=="completada").reduce((s,t)=>s+(t.estimatedHours||0),0)}h estimadas</span>
+        </div>
+        <div style={{ display:"flex",gap:4,flexWrap:"wrap" }}>
+          <select value={filter} onChange={e => setFilter(e.target.value)} style={{ border:"1px solid #E2E8F0",borderRadius:6,padding:"4px 8px",fontSize:10,fontWeight:600,outline:"none",fontFamily:"inherit",cursor:"pointer" }}>
+            <option value="all">Todos</option>
+            {Object.entries(STATUS_MAP).map(([k,v]) => <option key={k} value={k}>{v.icon} {v.label}</option>)}
+          </select>
+          <select value={clientFilter} onChange={e => setClientFilter(e.target.value)} style={{ border:"1px solid #E2E8F0",borderRadius:6,padding:"4px 8px",fontSize:10,fontWeight:600,outline:"none",fontFamily:"inherit",cursor:"pointer" }}>
+            <option value="all">Todos los clientes</option>
+            {clients.map(c => <option key={c.id} value={c.id}>{c.icon} {c.short}</option>)}
+          </select>
+          <button onClick={addTask} style={{ background:"#0F172A",color:"white",border:"none",padding:"4px 12px",borderRadius:6,fontSize:10,fontWeight:700,cursor:"pointer",fontFamily:"inherit" }}>+ Nueva tarea</button>
+        </div>
+      </div>
+
+      {clients.map(c => {
+        const hrs = totalByClient[c.id] || 0;
+        if (hrs === 0) return null;
+        return null;
+      })}
+
+      {Object.keys(totalByClient).length > 0 && (
+        <div style={{ padding:"8px 16px",borderBottom:"1px solid #F1F5F9",display:"flex",gap:12,flexWrap:"wrap" }}>
+          {clients.map(c => {
+            const hrs = totalByClient[c.id];
+            if (!hrs) return null;
+            return (
+              <div key={c.id} style={{ display:"flex",alignItems:"center",gap:4,fontSize:10,fontWeight:600 }}>
+                <span style={{ color:c.color }}>{c.icon} {c.short}:</span>
+                <span style={{ color:"#475569" }}>{hrs}h pendientes</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <div style={{ maxHeight:400,overflowY:"auto" }}>
+        {filtered.length === 0 && (
+          <div style={{ padding:"30px 16px",textAlign:"center",color:"#94A3B8" }}>
+            <div style={{ fontSize:28,marginBottom:8 }}>📝</div>
+            <div style={{ fontSize:12,fontWeight:500 }}>No hay tareas para esta semana</div>
+            <div style={{ fontSize:11,marginTop:4 }}>Clic en "+ Nueva tarea" para añadir</div>
+          </div>
+        )}
+        {filtered.map(t => {
+          const cl = clientMap[t.clientId];
+          const isEditing = editingId === t.id;
+          return (
+            <div key={t.id} style={{ padding:"10px 16px",borderBottom:"1px solid #F8FAFC",background:isEditing?"#F8FAFC":"white",transition:"background 0.15s" }}>
+              {isEditing ? (
+                <div style={{ display:"flex",flexDirection:"column",gap:8 }}>
+                  <input value={t.title} onChange={e => updateTask(t.id,"title",e.target.value)} placeholder="Nombre de la tarea..." autoFocus
+                    style={{ border:"2px solid #E2E8F0",borderRadius:8,padding:"8px 12px",fontSize:13,fontFamily:"inherit",outline:"none",fontWeight:600 }} />
+                  <div style={{ display:"flex",gap:6,flexWrap:"wrap" }}>
+                    <select value={t.clientId} onChange={e => updateTask(t.id,"clientId",e.target.value)}
+                      style={{ flex:1,border:"1px solid #E2E8F0",borderRadius:6,padding:"6px 8px",fontSize:11,fontFamily:"inherit",outline:"none" }}>
+                      {clients.map(c => <option key={c.id} value={c.id}>{c.icon} {c.name}</option>)}
+                    </select>
+                    <select value={t.status} onChange={e => updateTask(t.id,"status",e.target.value)}
+                      style={{ border:"1px solid #E2E8F0",borderRadius:6,padding:"6px 8px",fontSize:11,fontFamily:"inherit",outline:"none" }}>
+                      {Object.entries(STATUS_MAP).map(([k,v]) => <option key={k} value={k}>{v.icon} {v.label}</option>)}
+                    </select>
+                    <select value={t.priority} onChange={e => updateTask(t.id,"priority",e.target.value)}
+                      style={{ border:"1px solid #E2E8F0",borderRadius:6,padding:"6px 8px",fontSize:11,fontFamily:"inherit",outline:"none" }}>
+                      {Object.entries(PRIORITY_MAP).map(([k,v]) => <option key={k} value={k}>{v.icon} {v.label}</option>)}
+                    </select>
+                    <div style={{ display:"flex",alignItems:"center",gap:4 }}>
+                      <input type="number" value={t.estimatedHours} onChange={e => updateTask(t.id,"estimatedHours",Math.max(0.5,parseFloat(e.target.value)||0.5))} min="0.5" step="0.5"
+                        style={{ width:50,border:"1px solid #E2E8F0",borderRadius:6,padding:"6px 8px",fontSize:11,fontFamily:"inherit",outline:"none",textAlign:"center" }} />
+                      <span style={{ fontSize:10,color:"#94A3B8" }}>horas</span>
+                    </div>
+                  </div>
+                  <input value={t.notes||""} onChange={e => updateTask(t.id,"notes",e.target.value)} placeholder="Notas (opcional)..."
+                    style={{ border:"1px solid #E2E8F0",borderRadius:6,padding:"6px 10px",fontSize:11,fontFamily:"inherit",outline:"none",color:"#64748B" }} />
+                  <div style={{ display:"flex",justifyContent:"space-between" }}>
+                    <div style={{ display:"flex",gap:4 }}>
+                      <button onClick={() => deleteTask(t.id)} style={{ background:"#FEE2E2",color:"#DC2626",border:"none",padding:"5px 10px",borderRadius:6,fontSize:10,fontWeight:600,cursor:"pointer" }}>🗑 Eliminar</button>
+                      <button onClick={() => duplicateToNextWeek(t)} style={{ background:"#F1F5F9",color:"#475569",border:"none",padding:"5px 10px",borderRadius:6,fontSize:10,fontWeight:600,cursor:"pointer" }}>📅 Copiar a siguiente semana</button>
+                    </div>
+                    <button onClick={() => setEditingId(null)} style={{ background:"#0F172A",color:"white",border:"none",padding:"5px 14px",borderRadius:6,fontSize:10,fontWeight:600,cursor:"pointer" }}>Listo</button>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ display:"flex",alignItems:"center",gap:10,cursor:"pointer" }} onClick={() => setEditingId(t.id)}>
+                  <button onClick={e => { e.stopPropagation(); updateTask(t.id,"status",t.status==="completada"?"pendiente":"completada"); }}
+                    style={{ width:22,height:22,borderRadius:6,border:`2px solid ${t.status==="completada"?"#10B981":"#CBD5E1"}`,background:t.status==="completada"?"#10B981":"white",display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",flexShrink:0,fontSize:11,color:"white" }}>
+                    {t.status === "completada" && "✓"}
+                  </button>
+                  <div style={{ flex:1,minWidth:0 }}>
+                    <div style={{ fontSize:12,fontWeight:600,color:t.status==="completada"?"#94A3B8":"#1E293B",textDecoration:t.status==="completada"?"line-through":"none",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>
+                      {t.title || "Sin título"}
+                    </div>
+                    {t.notes && <div style={{ fontSize:10,color:"#94A3B8",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{t.notes}</div>}
+                  </div>
+                  <div style={{ display:"flex",alignItems:"center",gap:6,flexShrink:0 }}>
+                    {cl && <span style={{ fontSize:9,fontWeight:700,color:cl.color,background:`${cl.color}15`,padding:"2px 6px",borderRadius:4 }}>{cl.icon} {cl.short}</span>}
+                    <span style={{ fontSize:9,fontWeight:600,color:PRIORITY_MAP[t.priority]?.color }}>{PRIORITY_MAP[t.priority]?.icon}</span>
+                    <span style={{ fontSize:9,fontWeight:600,color:STATUS_MAP[t.status]?.color }}>{STATUS_MAP[t.status]?.icon}</span>
+                    <span style={{ fontSize:10,fontWeight:700,color:"#475569",fontFamily:"'JetBrains Mono',monospace" }}>{t.estimatedHours}h</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -388,64 +554,41 @@ function OutlookBtn({ date, hour, compact }) {
   const subject = encodeURIComponent("Reunión con Guillermo Prado");
   const body = encodeURIComponent("Hola Guillermo,\n\nTe convoco en tu horario disponible.\n\nSaludos");
   const url = `https://outlook.office.com/calendar/0/deeplink/compose?subject=${subject}&body=${body}&startdt=${start}&enddt=${end}&to=guillermo@externia.es`;
-  return (
-    <a href={url} target="_blank" rel="noopener noreferrer" style={{ display:"inline-flex",alignItems:"center",gap:4,background:"#0078D4",color:"white",padding:compact?"4px 8px":"6px 12px",borderRadius:6,fontSize:compact?9:11,fontWeight:600,textDecoration:"none",whiteSpace:"nowrap" }}>
-      📧 Outlook
-    </a>
-  );
+  return <a href={url} target="_blank" rel="noopener noreferrer" style={{ display:"inline-flex",alignItems:"center",gap:4,background:"#0078D4",color:"white",padding:compact?"4px 8px":"6px 12px",borderRadius:6,fontSize:compact?9:11,fontWeight:600,textDecoration:"none",whiteSpace:"nowrap" }}>📧 Outlook</a>;
 }
 
 function TeamsBtn({ date, hour, compact }) {
   const start = fmtOutlookDate(date, hour, 0);
   const subject = encodeURIComponent("Reunión con Guillermo Prado");
   const url = `https://teams.microsoft.com/l/meeting/new?subject=${subject}&startTime=${start}&content=${encodeURIComponent("Convocatoria en horario disponible")}`;
-  return (
-    <a href={url} target="_blank" rel="noopener noreferrer" style={{ display:"inline-flex",alignItems:"center",gap:4,background:"#5B5FC7",color:"white",padding:compact?"4px 8px":"6px 12px",borderRadius:6,fontSize:compact?9:11,fontWeight:600,textDecoration:"none",whiteSpace:"nowrap" }}>
-      💬 Teams
-    </a>
-  );
+  return <a href={url} target="_blank" rel="noopener noreferrer" style={{ display:"inline-flex",alignItems:"center",gap:4,background:"#5B5FC7",color:"white",padding:compact?"4px 8px":"6px 12px",borderRadius:6,fontSize:compact?9:11,fontWeight:600,textDecoration:"none",whiteSpace:"nowrap" }}>💬 Teams</a>;
 }
 
 function CalendarSetup({ clients, connections, onUpdate, onClose, msalReady, onConnect, onDisconnect, onSync, syncing }) {
   const [clientId, setClientId] = useState(store.get("gp4-azure-client-id") || "");
   const [saved, setSaved] = useState(!!store.get("gp4-azure-client-id"));
-
-  const saveClientId = () => {
-    store.set("gp4-azure-client-id", clientId.trim());
-    setSaved(true);
-    onUpdate();
-  };
-
+  const saveClientId = () => { store.set("gp4-azure-client-id", clientId.trim()); setSaved(true); onUpdate(); };
   return (
     <Modal onClose={onClose}>
       <div style={{ fontSize:18,fontWeight:700,color:"#1E293B",marginBottom:4 }}>📅 Sincronización con Outlook</div>
-      <div style={{ fontSize:12,color:"#64748B",marginBottom:20 }}>Conecta tus cuentas de Microsoft para ver los eventos del calendario en el grid.</div>
-
+      <div style={{ fontSize:12,color:"#64748B",marginBottom:20 }}>Conecta tus cuentas de Microsoft para ver los eventos del calendario.</div>
       <div style={{ background:"#F0F9FF",borderRadius:12,padding:16,marginBottom:20,border:"1px solid #BAE6FD" }}>
-        <div style={{ fontSize:12,fontWeight:700,color:"#0369A1",marginBottom:8 }}>1️⃣ Configuración Azure (una sola vez)</div>
+        <div style={{ fontSize:12,fontWeight:700,color:"#0369A1",marginBottom:8 }}>1️⃣ Configuración Azure</div>
         <div style={{ fontSize:11,color:"#475569",lineHeight:1.7,marginBottom:12 }}>
-          Para conectar tus calendarios necesitas registrar una app en Azure AD:
-          <br/>• Ve a <a href="https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank" rel="noopener noreferrer" style={{ color:"#2563EB",fontWeight:600 }}>Azure Portal → App Registrations</a>
-          <br/>• Clic en "New registration"
-          <br/>• Nombre: "Disponibilidad GP" (o lo que quieras)
-          <br/>• Supported account types: <strong>"Accounts in any organizational directory and personal Microsoft accounts"</strong>
-          <br/>• Redirect URI → <strong>Single-page application (SPA)</strong> → <code style={{ background:"#E2E8F0",padding:"1px 4px",borderRadius:4,fontSize:10 }}>{window.location.origin + window.location.pathname}</code>
-          <br/>• Copia el <strong>Application (client) ID</strong> y pégalo aquí abajo
+          Registra una app en <a href="https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank" rel="noopener noreferrer" style={{ color:"#2563EB",fontWeight:600 }}>Azure Portal</a> como SPA.
+          <br/>Redirect URI: <code style={{ background:"#E2E8F0",padding:"1px 4px",borderRadius:4,fontSize:10 }}>{window.location.origin + window.location.pathname}</code>
+          <br/>Permiso: <strong>Calendars.Read</strong>
         </div>
         <div style={{ display:"flex",gap:8 }}>
-          <input value={clientId} onChange={e => { setClientId(e.target.value); setSaved(false); }} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+          <input value={clientId} onChange={e => { setClientId(e.target.value); setSaved(false); }} placeholder="Application (client) ID"
             style={{ flex:1,border:"2px solid #E2E8F0",borderRadius:8,padding:"8px 12px",fontSize:12,fontFamily:"'JetBrains Mono',monospace",outline:"none" }} />
-          <button onClick={saveClientId} style={{ background:saved?"#059669":"#2563EB",color:"white",border:"none",padding:"8px 16px",borderRadius:8,fontSize:12,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap" }}>
+          <button onClick={saveClientId} style={{ background:saved?"#059669":"#2563EB",color:"white",border:"none",padding:"8px 16px",borderRadius:8,fontSize:12,fontWeight:600,cursor:"pointer" }}>
             {saved ? "✓ Guardado" : "Guardar"}
           </button>
         </div>
       </div>
-
       <div style={{ marginBottom:20 }}>
-        <div style={{ fontSize:12,fontWeight:700,color:"#1E293B",marginBottom:10 }}>2️⃣ Conectar cuentas de Microsoft</div>
-        <div style={{ fontSize:11,color:"#64748B",marginBottom:12 }}>
-          Vincula cada cuenta de Outlook/365 con el cliente correspondiente. Así la app sabe qué calendario pertenece a cada proyecto.
-        </div>
+        <div style={{ fontSize:12,fontWeight:700,color:"#1E293B",marginBottom:10 }}>2️⃣ Conectar cuentas</div>
         <div style={{ display:"flex",flexDirection:"column",gap:10 }}>
           {clients.map(c => {
             const conn = connections.find(x => x.clientId === c.id);
@@ -454,40 +597,24 @@ function CalendarSetup({ clients, connections, onUpdate, onClose, msalReady, onC
                 <span style={{ fontSize:16 }}>{c.icon}</span>
                 <div style={{ flex:1 }}>
                   <div style={{ fontSize:12,fontWeight:600,color:"#1E293B" }}>{c.name}</div>
-                  {conn ? (
-                    <div style={{ fontSize:10,color:"#059669",fontWeight:500 }}>✓ {conn.email}</div>
-                  ) : (
-                    <div style={{ fontSize:10,color:"#94A3B8" }}>Sin conectar</div>
-                  )}
+                  {conn ? <div style={{ fontSize:10,color:"#059669",fontWeight:500 }}>✓ {conn.email}</div> : <div style={{ fontSize:10,color:"#94A3B8" }}>Sin conectar</div>}
                 </div>
                 {conn ? (
-                  <button onClick={() => onDisconnect(c.id)} style={{ background:"#FEE2E2",color:"#DC2626",border:"none",padding:"5px 10px",borderRadius:6,fontSize:10,fontWeight:600,cursor:"pointer" }}>
-                    Desconectar
-                  </button>
+                  <button onClick={() => onDisconnect(c.id)} style={{ background:"#FEE2E2",color:"#DC2626",border:"none",padding:"5px 10px",borderRadius:6,fontSize:10,fontWeight:600,cursor:"pointer" }}>Desconectar</button>
                 ) : (
-                  <button onClick={() => onConnect(c.id)} disabled={!msalReady}
-                    style={{ background:msalReady?c.color:"#CBD5E1",color:"white",border:"none",padding:"5px 10px",borderRadius:6,fontSize:10,fontWeight:600,cursor:msalReady?"pointer":"not-allowed",opacity:msalReady?1:0.5 }}>
-                    Conectar cuenta
-                  </button>
+                  <button onClick={() => onConnect(c.id)} disabled={!msalReady} style={{ background:msalReady?c.color:"#CBD5E1",color:"white",border:"none",padding:"5px 10px",borderRadius:6,fontSize:10,fontWeight:600,cursor:msalReady?"pointer":"not-allowed" }}>Conectar</button>
                 )}
               </div>
             );
           })}
         </div>
       </div>
-
       {connections.length > 0 && (
-        <button onClick={onSync} disabled={syncing}
-          style={{ width:"100%",background:syncing?"#94A3B8":"#0F172A",color:"white",border:"none",padding:"12px",borderRadius:10,fontSize:13,fontWeight:600,cursor:syncing?"wait":"pointer",marginBottom:12 }}>
-          {syncing ? "⏳ Sincronizando..." : "🔄 Sincronizar calendarios ahora"}
+        <button onClick={onSync} disabled={syncing} style={{ width:"100%",background:syncing?"#94A3B8":"#0F172A",color:"white",border:"none",padding:"12px",borderRadius:10,fontSize:13,fontWeight:600,cursor:syncing?"wait":"pointer" }}>
+          {syncing ? "⏳ Sincronizando..." : "🔄 Sincronizar ahora"}
         </button>
       )}
-
-      {!msalReady && saved && (
-        <div style={{ background:"#FEF3C7",borderRadius:8,padding:10,fontSize:11,color:"#92400E" }}>
-          ⚠️ Inicializando MSAL... Cierra esta ventana y vuelve a abrirla. Si persiste, recarga la página (F5).
-        </div>
-      )}
+      {!msalReady && saved && <div style={{ marginTop:12,background:"#FEF3C7",borderRadius:8,padding:10,fontSize:11,color:"#92400E" }}>⚠️ Inicializando MSAL... Cierra y vuelve a abrir, o recarga (F5).</div>}
     </Modal>
   );
 }
@@ -498,6 +625,7 @@ export default function App() {
   const [weeks, setWeeks] = useState({});
   const [clients, setClients] = useState(DEFAULT_CLIENTS);
   const [templates, setTemplates] = useState({});
+  const [tasks, setTasks] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [toast, setToast] = useState(null);
   const [showClientMgr, setShowClientMgr] = useState(false);
@@ -511,7 +639,7 @@ export default function App() {
   const [editingEmail, setEditingEmail] = useState(false);
   const [shareEmailText, setShareEmailText] = useState("");
   const [paintClient, setPaintClient] = useState(null);
-
+  const [showTasks, setShowTasks] = useState(true);
   const [msalReady, setMsalReady] = useState(false);
   const [calConnections, setCalConnections] = useState([]);
   const [calEvents, setCalEvents] = useState({});
@@ -526,12 +654,13 @@ export default function App() {
     const c = store.get("gp4-clients");
     const t = store.get("gp4-templates");
     const conn = store.get("gp4-cal-connections");
+    const tk = store.get("gp5-tasks");
     if (w) setWeeks(w);
     if (c) setClients(c);
     if (t) setTemplates(t);
     if (conn) setCalConnections(conn);
+    if (tk) setTasks(tk);
     setLoaded(true);
-
     initMsalFromStorage();
   }, []);
 
@@ -539,20 +668,14 @@ export default function App() {
     const cid = store.get("gp4-azure-client-id");
     if (!cid) return;
     const inst = await createMsal(cid, window.location.origin + window.location.pathname);
-    if (inst) {
-      msalRef.current = inst;
-      setMsalReady(true);
-    }
+    if (inst) { msalRef.current = inst; setMsalReady(true); }
   }
 
   const handleMsalUpdate = async () => {
     const cid = store.get("gp4-azure-client-id");
     if (!cid) return;
     const inst = await createMsal(cid, window.location.origin + window.location.pathname);
-    if (inst) {
-      msalRef.current = inst;
-      setMsalReady(true);
-    }
+    if (inst) { msalRef.current = inst; setMsalReady(true); }
   };
 
   const connectAccount = async (clientId) => {
@@ -561,52 +684,38 @@ export default function App() {
     if (!account) { flash("No se pudo conectar"); return; }
     const updated = calConnections.filter(x => x.clientId !== clientId);
     updated.push({ clientId, email: account.username, homeAccountId: account.homeAccountId });
-    setCalConnections(updated);
-    store.set("gp4-cal-connections", updated);
+    setCalConnections(updated); store.set("gp4-cal-connections", updated);
     flash(`✓ Conectado: ${account.username}`);
   };
 
   const disconnectAccount = (clientId) => {
     const updated = calConnections.filter(x => x.clientId !== clientId);
-    setCalConnections(updated);
-    store.set("gp4-cal-connections", updated);
-    const evts = { ...calEvents };
-    delete evts[clientId];
-    setCalEvents(evts);
-    flash("Cuenta desconectada");
+    setCalConnections(updated); store.set("gp4-cal-connections", updated);
+    const evts = { ...calEvents }; delete evts[clientId]; setCalEvents(evts);
+    flash("Desconectado");
   };
 
   const syncCalendars = async () => {
     if (!msalRef.current || calConnections.length === 0) return;
     setSyncing(true);
-    const start = new Date(monday);
-    start.setHours(0, 0, 0, 0);
-    const end = new Date(monday);
-    end.setDate(end.getDate() + 5);
-    end.setHours(0, 0, 0, 0);
-
+    const start = new Date(monday); start.setHours(0,0,0,0);
+    const end = new Date(monday); end.setDate(end.getDate()+5); end.setHours(0,0,0,0);
     const allEvents = {};
     for (const conn of calConnections) {
       const accounts = msalRef.current.getAllAccounts();
       const acc = accounts.find(a => a.homeAccountId === conn.homeAccountId);
       if (!acc) { allEvents[conn.clientId] = {}; continue; }
-
       const token = await msalGetToken(msalRef.current, acc);
       if (!token) { allEvents[conn.clientId] = {}; continue; }
-
       const events = await fetchCalendarEvents(token, start, end);
       allEvents[conn.clientId] = parseEventsToSlots(events, monday);
     }
-
-    setCalEvents(allEvents);
-    setSyncing(false);
-    flash(`✓ Sincronizado: ${Object.values(allEvents).reduce((sum, ev) => sum + Object.keys(ev).length, 0)} franjas con eventos`);
+    setCalEvents(allEvents); setSyncing(false);
+    flash(`✓ Sincronizado`);
   };
 
   useEffect(() => {
-    if (calConnections.length > 0 && msalReady) {
-      syncCalendars();
-    }
+    if (calConnections.length > 0 && msalReady) syncCalendars();
   }, [weekKey, msalReady]);
 
   const persist = useCallback((w, c, t) => {
@@ -615,11 +724,12 @@ export default function App() {
     if (t !== undefined) store.set("gp4-templates", t);
   }, []);
 
-  const flash = (m) => { setToast(m); setTimeout(() => setToast(null), 2500); };
+  const persistTasks = useCallback((tk) => { store.set("gp5-tasks", tk); }, []);
 
-  const clientMap = useMemo(() => {
-    const m = {}; clients.forEach(c => m[c.id] = c); return m;
-  }, [clients]);
+  const updateTasks = (newTasks) => { setTasks(newTasks); persistTasks(newTasks); };
+
+  const flash = (m) => { setToast(m); setTimeout(() => setToast(null), 2500); };
+  const clientMap = useMemo(() => { const m = {}; clients.forEach(c => m[c.id] = c); return m; }, [clients]);
 
   const setBlock = (slotKey, clientId) => {
     const updated = { ...weeks, [weekKey]: { ...currentBlocks, [slotKey]: clientId } };
@@ -627,38 +737,31 @@ export default function App() {
   };
 
   const activePaint = paintClient || clients[0]?.id || FREE;
-
-  const cycleBlock = (slotKey) => {
-    const cur = currentBlocks[slotKey];
-    if (cur === activePaint) return FREE;
-    return activePaint;
-  };
+  const cycleBlock = (slotKey) => { const cur = currentBlocks[slotKey]; return cur === activePaint ? FREE : activePaint; };
 
   const navWeek = (d) => { const dt = new Date(monday); dt.setDate(dt.getDate() + d * 7); setMonday(dt); };
   const goToday = () => setMonday(getMonday(new Date()));
 
   const copyPrev = () => {
-    const prev = new Date(monday); prev.setDate(prev.getDate() - 7);
+    const prev = new Date(monday); prev.setDate(prev.getDate()-7);
     const pk = fmtWeekKey(prev);
-    if (weeks[pk]) { const u = { ...weeks, [weekKey]: { ...weeks[pk] } }; setWeeks(u); persist(u, undefined, undefined); flash("Semana anterior copiada"); }
-    else flash("No hay datos en la semana anterior");
+    if (weeks[pk]) { const u = { ...weeks, [weekKey]: { ...weeks[pk] } }; setWeeks(u); persist(u,undefined,undefined); flash("Copiada"); }
+    else flash("No hay datos");
   };
 
-  const clearWeek = () => { const u = { ...weeks, [weekKey]: defaultBlocks() }; setWeeks(u); persist(u, undefined, undefined); flash("Semana limpiada"); };
+  const clearWeek = () => { const u = { ...weeks, [weekKey]: defaultBlocks() }; setWeeks(u); persist(u,undefined,undefined); flash("Limpia"); };
 
   const exportConfig = () => {
-    const data = { weeks, clients, templates, azureClientId: store.get("gp4-azure-client-id"), calConnections, version: "4.0" };
+    const data = { weeks, clients, templates, tasks, azureClientId: store.get("gp4-azure-client-id"), calConnections, version: "5.0" };
     downloadFile(JSON.stringify(data, null, 2), `disponibilidad-backup-${new Date().toISOString().split("T")[0]}.json`, "application/json");
     flash("Backup descargado ✓");
   };
 
   const importConfig = () => {
     const input = document.createElement("input");
-    input.type = "file";
-    input.accept = ".json";
+    input.type = "file"; input.accept = ".json";
     input.onchange = (e) => {
-      const file = e.target.files[0];
-      if (!file) return;
+      const file = e.target.files[0]; if (!file) return;
       const reader = new FileReader();
       reader.onload = (ev) => {
         try {
@@ -666,41 +769,75 @@ export default function App() {
           if (data.weeks) { setWeeks(data.weeks); store.set("gp4-weeks", data.weeks); }
           if (data.clients) { setClients(data.clients); store.set("gp4-clients", data.clients); }
           if (data.templates) { setTemplates(data.templates); store.set("gp4-templates", data.templates); }
+          if (data.tasks) { setTasks(data.tasks); store.set("gp5-tasks", data.tasks); }
           if (data.azureClientId) store.set("gp4-azure-client-id", data.azureClientId);
           if (data.calConnections) { setCalConnections(data.calConnections); store.set("gp4-cal-connections", data.calConnections); }
-          flash("✓ Configuración restaurada");
-        } catch { flash("Error: archivo no válido"); }
+          flash("✓ Restaurado");
+        } catch { flash("Archivo no válido"); }
       };
       reader.readAsText(file);
     };
     input.click();
   };
 
-  const autoFillFromCalendar = () => {
-    if (Object.keys(calEvents).length === 0) { flash("Sincroniza los calendarios primero"); return; }
+  const autoFillSmart = () => {
+    const weekTasks = tasks.filter(t => t.weekKey === weekKey && t.status !== "completada");
+    const hasCalEvents = Object.keys(calEvents).length > 0;
+
+    if (weekTasks.length === 0 && !hasCalEvents) { flash("Añade tareas o sincroniza calendarios primero"); return; }
+
     const newBlocks = { ...currentBlocks };
-    Object.entries(calEvents).forEach(([clientId, slots]) => {
-      Object.keys(slots).forEach(slotKey => {
-        if (newBlocks[slotKey] === FREE) {
-          newBlocks[slotKey] = clientId;
-        }
+
+    if (hasCalEvents) {
+      Object.entries(calEvents).forEach(([clientId, slots]) => {
+        Object.keys(slots).forEach(slotKey => {
+          if (newBlocks[slotKey] === FREE) newBlocks[slotKey] = clientId;
+        });
       });
+    }
+
+    const tasksByClient = {};
+    weekTasks.sort((a, b) => {
+      const po = { alta: 0, media: 1, baja: 2 };
+      return (po[a.priority] || 1) - (po[b.priority] || 1);
+    }).forEach(t => {
+      if (!tasksByClient[t.clientId]) tasksByClient[t.clientId] = [];
+      tasksByClient[t.clientId].push(t);
     });
+
+    Object.entries(tasksByClient).forEach(([clientId, clientTasks]) => {
+      let hoursNeeded = clientTasks.reduce((s, t) => s + (t.estimatedHours || 0), 0);
+      const alreadyAssigned = Object.values(newBlocks).filter(v => v === clientId).length;
+      hoursNeeded = Math.max(0, Math.ceil(hoursNeeded) - alreadyAssigned);
+
+      if (hoursNeeded <= 0) return;
+
+      for (const d of DAYS) {
+        for (const h of HOURS) {
+          if (hoursNeeded <= 0) break;
+          const slotKey = `${d.key}_${h}`;
+          if (newBlocks[slotKey] === FREE) {
+            newBlocks[slotKey] = clientId;
+            hoursNeeded--;
+          }
+        }
+        if (hoursNeeded <= 0) break;
+      }
+    });
+
     const u = { ...weeks, [weekKey]: newBlocks };
     setWeeks(u); persist(u, undefined, undefined);
-    flash("✓ Bloques rellenados desde calendarios");
+    flash("✓ Auto-rellenado con tareas y calendario");
   };
 
-  const saveClients = (nc) => { setClients(nc); persist(undefined, nc, undefined); flash("Clientes actualizados"); };
+  const saveClients = (nc) => { setClients(nc); persist(undefined,nc,undefined); flash("Clientes actualizados"); };
   const saveTemplate = () => {
     if (!templateName.trim()) return;
     const nt = { ...templates, [templateName.trim()]: { ...currentBlocks } };
-    setTemplates(nt); persist(undefined, undefined, nt); setTemplateName(""); flash("Plantilla guardada");
+    setTemplates(nt); persist(undefined,undefined,nt); setTemplateName(""); flash("Plantilla guardada");
   };
-  const applyTemplate = (n) => {
-    const u = { ...weeks, [weekKey]: { ...templates[n] } }; setWeeks(u); persist(u, undefined, undefined); flash("Plantilla aplicada"); setShowTemplates(false);
-  };
-  const delTemplate = (n) => { const nt = { ...templates }; delete nt[n]; setTemplates(nt); persist(undefined, undefined, nt); flash("Eliminada"); };
+  const applyTemplate = (n) => { const u = { ...weeks, [weekKey]: { ...templates[n] } }; setWeeks(u); persist(u,undefined,undefined); flash("Aplicada"); setShowTemplates(false); };
+  const delTemplate = (n) => { const nt = { ...templates }; delete nt[n]; setTemplates(nt); persist(undefined,undefined,nt); flash("Eliminada"); };
 
   const stats = useMemo(() => {
     const s = {}; clients.forEach(c => s[c.id] = 0); s[FREE] = 0;
@@ -709,29 +846,17 @@ export default function App() {
   }, [currentBlocks, clients]);
 
   const weekRange = fmtRange(monday);
-  const getShareEmail = (cId) => generateNaturalAvailability(currentBlocks, cId, clientMap[cId]?.name || cId, weekRange);
-  const getAdminSummary = () => generateAdminSummary(currentBlocks, clientMap, weekRange);
+  const weekTasks = useMemo(() => tasks.filter(t => t.weekKey === weekKey), [tasks, weekKey]);
+  const getShareEmail = (cId) => generateNaturalAvailability(currentBlocks, cId, clientMap[cId]?.name || cId, weekRange, weekTasks);
+  const getAdminSummary = () => generateAdminSummary(currentBlocks, clientMap, weekRange, weekTasks);
   const copyText = (t) => { navigator.clipboard.writeText(t); flash("Copiado ✓"); };
 
-  const exportFullICS = () => {
-    try {
-      downloadFile(generateFullICS(currentBlocks, monday, clientMap), `disponibilidad-${weekKey}.ics`, "text/calendar");
-      flash("ICS descargado");
-    } catch { flash("Error al generar .ics"); }
-  };
-
-  const exportBlockingICS = (cId) => {
-    try {
-      downloadFile(generateBlockingICS(currentBlocks, cId, monday, clientMap), `bloqueo-${clientMap[cId]?.short || cId}-${weekKey}.ics`, "text/calendar");
-      flash("Bloqueo .ics descargado");
-    } catch { flash("Error"); }
-  };
+  const exportFullICS = () => { try { downloadFile(generateFullICS(currentBlocks, monday, clientMap), `disponibilidad-${weekKey}.ics`, "text/calendar"); flash("ICS descargado"); } catch { flash("Error"); } };
+  const exportBlockingICS = (cId) => { try { downloadFile(generateBlockingICS(currentBlocks, cId, monday), `bloqueo-${clientMap[cId]?.short||cId}-${weekKey}.ics`, "text/calendar"); flash("Bloqueo descargado"); } catch { flash("Error"); } };
 
   const isClient = view !== "admin" && clientMap[view];
 
-  useEffect(() => {
-    if (shareModal) setShareEmailText(getShareEmail(shareModal));
-  }, [shareModal, weekKey, currentBlocks]);
+  useEffect(() => { if (shareModal) setShareEmailText(getShareEmail(shareModal)); }, [shareModal, weekKey, currentBlocks, tasks]);
 
   const allCalSlots = useMemo(() => {
     const merged = {};
@@ -752,11 +877,8 @@ export default function App() {
     </div>
   );
 
-  const isMorning = (h) => h < 14;
-
   return (
-    <div style={{ minHeight:"100vh",background:"#F1F5F9",fontFamily:"'Archivo',sans-serif" }}
-      onMouseUp={() => setPainting(null)} onMouseLeave={() => setPainting(null)}>
+    <div style={{ minHeight:"100vh",background:"#F1F5F9",fontFamily:"'Archivo',sans-serif" }} onMouseUp={() => setPainting(null)} onMouseLeave={() => setPainting(null)}>
       <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet" />
       <Toast msg={toast} />
       <style>{`
@@ -769,18 +891,13 @@ export default function App() {
         .nb:hover { background:#CBD5E1; }
         .tab { padding:8px 14px; border-radius:8px; border:none; cursor:pointer; font-size:11px; font-weight:600; transition:all 0.2s; font-family:'Archivo',sans-serif; white-space:nowrap; }
         .paint-btn { padding:6px 12px; border-radius:8px; border:2px solid transparent; cursor:pointer; font-size:11px; font-weight:700; font-family:'Archivo',sans-serif; transition:all 0.15s; display:flex; align-items:center; gap:5px; }
-        .paint-btn:hover { filter:brightness(0.95); }
-        .cal-dot { width:6px; height:6px; border-radius:50%; display:inline-block; flex-shrink:0; }
         .cal-badge { display:inline-flex; align-items:center; gap:3px; padding:1px 5px; border-radius:4px; font-size:8px; font-weight:600; line-height:1.3; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       `}</style>
 
       <header style={{ background:"#0F172A",color:"white",padding:"14px 20px",display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:10 }}>
         <div style={{ display:"flex",alignItems:"center",gap:10 }}>
           <div style={{ width:36,height:36,borderRadius:10,background:"linear-gradient(135deg,#2563EB,#7C3AED)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,fontWeight:800,fontFamily:"'JetBrains Mono',monospace",color:"white" }}>GP</div>
-          <div>
-            <div style={{ fontSize:15,fontWeight:700,letterSpacing:"-0.3px" }}>Guillermo Prado</div>
-            <div style={{ fontSize:10,color:"#94A3B8",fontWeight:500 }}>Gestión de Disponibilidad</div>
-          </div>
+          <div><div style={{ fontSize:15,fontWeight:700,letterSpacing:"-0.3px" }}>Guillermo Prado</div><div style={{ fontSize:10,color:"#94A3B8",fontWeight:500 }}>Gestión de Disponibilidad v5</div></div>
         </div>
         <div style={{ display:"flex",gap:3,background:"#1E293B",borderRadius:10,padding:3,flexWrap:"wrap" }}>
           <button className="tab" onClick={() => setView("admin")} style={{ background:view==="admin"?"#7C3AED":"transparent",color:view==="admin"?"white":"#94A3B8" }}>⚙️ Admin</button>
@@ -793,37 +910,32 @@ export default function App() {
       </header>
 
       <div style={{ maxWidth:1100,margin:"0 auto",padding:"16px 12px" }}>
-
         <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12,flexWrap:"wrap",gap:8 }}>
           <div style={{ display:"flex",alignItems:"center",gap:5 }}>
             <button className="nb" onClick={() => navWeek(-1)}>←</button>
-            <button className="nb" onClick={goToday} style={{ width:"auto",padding:"0 10px",fontSize:11,fontWeight:700,fontFamily:"'Archivo',sans-serif" }}>Hoy</button>
+            <button className="nb" onClick={goToday} style={{ width:"auto",padding:"0 10px",fontSize:11,fontWeight:700 }}>Hoy</button>
             <button className="nb" onClick={() => navWeek(1)}>→</button>
             <span style={{ fontSize:13,fontWeight:700,color:"#1E293B",marginLeft:6,fontFamily:"'JetBrains Mono',monospace" }}>{weekRange}</span>
           </div>
           {view === "admin" && (
             <div style={{ display:"flex",gap:5,flexWrap:"wrap" }}>
               <button className="btn" onClick={() => setShowCalSetup(true)} style={{ background:hasCalData?"#059669":"#0891B2",color:"white",padding:"6px 10px",borderRadius:8,fontSize:10,fontWeight:600 }}>
-                {hasCalData ? "📅 Calendario ✓" : "📅 Calendario"}
+                {hasCalData ? "📅 ✓" : "📅 Cal"}
               </button>
-              {hasCalData && (
-                <>
-                  <button className="btn" onClick={syncCalendars} disabled={syncing} style={{ background:"#0F172A",color:"white",padding:"6px 10px",borderRadius:8,fontSize:10,fontWeight:600,opacity:syncing?0.5:1 }}>
-                    {syncing ? "⏳" : "🔄"} Sync
-                  </button>
-                  <button className="btn" onClick={autoFillFromCalendar} style={{ background:"#7C3AED",color:"white",padding:"6px 10px",borderRadius:8,fontSize:10,fontWeight:600 }}>
-                    ✨ Auto-rellenar
-                  </button>
-                </>
+              {(hasCalData || weekTasks.length > 0) && (
+                <button className="btn" onClick={autoFillSmart} style={{ background:"#7C3AED",color:"white",padding:"6px 10px",borderRadius:8,fontSize:10,fontWeight:600 }}>✨ Auto</button>
               )}
-              <button className="btn" onClick={copyPrev} style={{ background:"#E2E8F0",color:"#475569",padding:"6px 10px",borderRadius:8,fontSize:10,fontWeight:600 }}>← Copiar</button>
+              {hasCalData && (
+                <button className="btn" onClick={syncCalendars} disabled={syncing} style={{ background:"#0F172A",color:"white",padding:"6px 10px",borderRadius:8,fontSize:10,fontWeight:600,opacity:syncing?0.5:1 }}>🔄</button>
+              )}
+              <button className="btn" onClick={copyPrev} style={{ background:"#E2E8F0",color:"#475569",padding:"6px 10px",borderRadius:8,fontSize:10,fontWeight:600 }}>←</button>
               <button className="btn" onClick={clearWeek} style={{ background:"#FEE2E2",color:"#DC2626",padding:"6px 10px",borderRadius:8,fontSize:10,fontWeight:600 }}>🗑</button>
               <button className="btn" onClick={() => setShowTemplates(!showTemplates)} style={{ background:"#E2E8F0",color:"#475569",padding:"6px 10px",borderRadius:8,fontSize:10,fontWeight:600 }}>📋</button>
               <button className="btn" onClick={() => setShowClientMgr(true)} style={{ background:"#E2E8F0",color:"#475569",padding:"6px 10px",borderRadius:8,fontSize:10,fontWeight:600 }}>👥</button>
               <button className="btn" onClick={exportFullICS} style={{ background:"#E2E8F0",color:"#475569",padding:"6px 10px",borderRadius:8,fontSize:10,fontWeight:600 }}>📥</button>
-              <button className="btn" onClick={() => copyText(getAdminSummary())} style={{ background:"#7C3AED",color:"white",padding:"6px 10px",borderRadius:8,fontSize:10,fontWeight:600 }}>📋 Resumen</button>
-              <button className="btn" onClick={exportConfig} style={{ background:"#0F172A",color:"white",padding:"6px 10px",borderRadius:8,fontSize:10,fontWeight:600 }}>💾 Backup</button>
-              <button className="btn" onClick={importConfig} style={{ background:"#475569",color:"white",padding:"6px 10px",borderRadius:8,fontSize:10,fontWeight:600 }}>📂 Restaurar</button>
+              <button className="btn" onClick={() => copyText(getAdminSummary())} style={{ background:"#7C3AED",color:"white",padding:"6px 10px",borderRadius:8,fontSize:10,fontWeight:600 }}>📋</button>
+              <button className="btn" onClick={exportConfig} style={{ background:"#0F172A",color:"white",padding:"6px 10px",borderRadius:8,fontSize:10,fontWeight:600 }}>💾</button>
+              <button className="btn" onClick={importConfig} style={{ background:"#475569",color:"white",padding:"6px 10px",borderRadius:8,fontSize:10,fontWeight:600 }}>📂</button>
             </div>
           )}
           {isClient && (
@@ -898,7 +1010,7 @@ export default function App() {
           {HOURS.map(h => (
             <div key={h} style={{ display:"grid",gridTemplateColumns:"54px repeat(5, 1fr)",borderBottom:"1px solid #F1F5F9",position:"relative" }}>
               {h === 14 && <div style={{ position:"absolute",top:-1,left:0,right:0,height:3,background:"linear-gradient(90deg, #F97316 0%, #F9731640 50%, transparent 100%)",zIndex:1 }} />}
-              <div style={{ padding:"2px 4px",display:"flex",flexDirection:"column",justifyContent:"center",alignItems:"center",background:isMorning(h)?"#FEFCE8":"#FFF7ED",borderRight:"1px solid #F1F5F9" }}>
+              <div style={{ padding:"2px 4px",display:"flex",flexDirection:"column",justifyContent:"center",alignItems:"center",background:h<14?"#FEFCE8":"#FFF7ED",borderRight:"1px solid #F1F5F9" }}>
                 <div style={{ fontSize:11,fontWeight:700,color:"#475569",fontFamily:"'JetBrains Mono',monospace" }}>{fmtHour(h)}</div>
               </div>
               {DAYS.map((d, di) => {
@@ -915,18 +1027,12 @@ export default function App() {
                   return (
                     <div key={slotKey} className="cell" style={{
                       borderLeft:"1px solid #F1F5F9",padding:4,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:2,
-                      background:mine?`${clientMap[view].color}18`:free?"#F0FDF4":"#FAFAFA",
-                      cursor:free?"pointer":"default",minHeight:isExp?60:36,
+                      background:mine?`${clientMap[view].color}18`:free?"#F0FDF4":"#FAFAFA",cursor:free?"pointer":"default",minHeight:isExp?60:36,
                     }} onClick={() => free && setExpandedSlot(isExp ? null : slotKey)}>
                       {mine && <span style={{ fontSize:9,fontWeight:700,color:clientMap[view].color }}>{clientMap[view].icon} Asignado</span>}
-                      {free && !isExp && <span style={{ fontSize:9,fontWeight:600,color:"#059669" }}>🟢 Disponible</span>}
-                      {free && isExp && (
-                        <div style={{ display:"flex",gap:4,alignItems:"center",flexWrap:"wrap",justifyContent:"center" }}>
-                          <OutlookBtn date={dd} hour={h} compact />
-                          <TeamsBtn date={dd} hour={h} compact />
-                        </div>
-                      )}
-                      {!mine && !free && <span style={{ fontSize:9,color:"#CBD5E1",fontWeight:500 }}>⛔</span>}
+                      {free && !isExp && <span style={{ fontSize:9,fontWeight:600,color:"#059669" }}>🟢</span>}
+                      {free && isExp && <div style={{ display:"flex",gap:4,alignItems:"center",flexWrap:"wrap",justifyContent:"center" }}><OutlookBtn date={dd} hour={h} compact /><TeamsBtn date={dd} hour={h} compact /></div>}
+                      {!mine && !free && <span style={{ fontSize:9,color:"#CBD5E1" }}>⛔</span>}
                     </div>
                   );
                 }
@@ -935,30 +1041,14 @@ export default function App() {
                 return (
                   <div key={slotKey} className="cell" style={{
                     borderLeft:"1px solid #F1F5F9",padding:hasEvt?"2px 3px":"4px",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:hasEvt?"flex-start":"center",
-                    background:cl?`${cl.color}14`:hasEvt?"#FEFCE8":"#FAFAFA",cursor:"pointer",userSelect:"none",minHeight:36,gap:1,position:"relative",
-                  }} onMouseDown={(e) => {
-                    e.preventDefault();
-                    const next = cycleBlock(slotKey);
-                    setPainting(next); setBlock(slotKey, next);
-                  }} onMouseEnter={() => { if (painting !== null) setBlock(slotKey, painting); }}>
-                    {cl ? (
-                      <span style={{ fontSize:9,fontWeight:700,color:cl.color }}>{cl.icon} {cl.short}</span>
-                    ) : (
-                      !hasEvt && <span style={{ fontSize:9,fontWeight:600,color:"#CBD5E1" }}>—</span>
-                    )}
-                    {hasEvt && calSlotEvents.slice(0, 2).map((ev, i) => {
+                    background:cl?`${cl.color}14`:hasEvt?"#FEFCE8":"#FAFAFA",cursor:"pointer",userSelect:"none",minHeight:36,gap:1,
+                  }} onMouseDown={(e) => { e.preventDefault(); const next = cycleBlock(slotKey); setPainting(next); setBlock(slotKey, next); }}
+                    onMouseEnter={() => { if (painting !== null) setBlock(slotKey, painting); }}>
+                    {cl ? <span style={{ fontSize:9,fontWeight:700,color:cl.color }}>{cl.icon} {cl.short}</span> : !hasEvt && <span style={{ fontSize:9,color:"#CBD5E1" }}>—</span>}
+                    {hasEvt && calSlotEvents.slice(0,2).map((ev,i) => {
                       const evClient = clientMap[ev.clientId];
-                      return (
-                        <div key={i} className="cal-badge" style={{ background:`${evClient?.color || "#94A3B8"}20`,color:evClient?.color || "#475569" }}
-                          title={`${ev.subject} (${ev.start || ""}${ev.end ? "–" + ev.end : ""})`}>
-                          <span className="cal-dot" style={{ background:evClient?.color || "#94A3B8" }} />
-                          {ev.subject?.substring(0, 18) || "Evento"}
-                        </div>
-                      );
+                      return <div key={i} className="cal-badge" style={{ background:`${evClient?.color||"#94A3B8"}20`,color:evClient?.color||"#475569" }} title={ev.subject}><span style={{ width:6,height:6,borderRadius:"50%",background:evClient?.color||"#94A3B8",flexShrink:0 }} />{ev.subject?.substring(0,18)||"Evento"}</div>;
                     })}
-                    {calSlotEvents.length > 2 && (
-                      <span style={{ fontSize:7,color:"#94A3B8",fontWeight:600 }}>+{calSlotEvents.length - 2}</span>
-                    )}
                   </div>
                 );
               })}
@@ -970,11 +1060,14 @@ export default function App() {
           <div style={{ marginTop:12,display:"grid",gridTemplateColumns:`repeat(${Math.min(clients.length + 1, 5)}, 1fr)`,gap:6 }}>
             {clients.map(c => {
               const h = stats[c.id]||0;
+              const taskH = weekTasks.filter(t => t.clientId===c.id && t.status!=="completada").reduce((s,t)=>s+(t.estimatedHours||0),0);
               const pct = Math.round((h / TOTAL_SLOTS) * 100);
+              const overloaded = taskH > h;
               return (
                 <div key={c.id} style={{ background:"white",borderRadius:10,padding:"10px 8px",boxShadow:"0 1px 3px rgba(0,0,0,0.04)",textAlign:"center",borderTop:`3px solid ${c.color}` }}>
-                  <div style={{ fontSize:9,fontWeight:700,color:"#94A3B8",textTransform:"uppercase",letterSpacing:0.5 }}>{c.short}</div>
-                  <div style={{ fontSize:20,fontWeight:800,color:c.color,fontFamily:"'JetBrains Mono',monospace",margin:"1px 0" }}>{h}h</div>
+                  <div style={{ fontSize:9,fontWeight:700,color:"#94A3B8",textTransform:"uppercase" }}>{c.short}</div>
+                  <div style={{ fontSize:20,fontWeight:800,color:c.color,fontFamily:"'JetBrains Mono',monospace" }}>{h}h</div>
+                  {taskH > 0 && <div style={{ fontSize:9,color:overloaded?"#EF4444":"#64748B",fontWeight:600 }}>{taskH}h en tareas{overloaded?" ⚠️":""}</div>}
                   <div style={{ fontSize:9,color:"#94A3B8" }}>{pct}%</div>
                   <div style={{ height:3,background:"#F1F5F9",borderRadius:2,marginTop:4,overflow:"hidden" }}>
                     <div style={{ height:"100%",width:`${pct}%`,background:c.color,borderRadius:2,transition:"width 0.3s" }} />
@@ -984,12 +1077,21 @@ export default function App() {
             })}
             <div style={{ background:"white",borderRadius:10,padding:"10px 8px",boxShadow:"0 1px 3px rgba(0,0,0,0.04)",textAlign:"center",borderTop:"3px solid #9CA3AF" }}>
               <div style={{ fontSize:9,fontWeight:700,color:"#94A3B8",textTransform:"uppercase" }}>Libre</div>
-              <div style={{ fontSize:20,fontWeight:800,color:"#9CA3AF",fontFamily:"'JetBrains Mono',monospace",margin:"1px 0" }}>{stats[FREE]||0}h</div>
+              <div style={{ fontSize:20,fontWeight:800,color:"#9CA3AF",fontFamily:"'JetBrains Mono',monospace" }}>{stats[FREE]||0}h</div>
               <div style={{ fontSize:9,color:"#94A3B8" }}>{Math.round(((stats[FREE]||0) / TOTAL_SLOTS) * 100)}%</div>
-              <div style={{ height:3,background:"#F1F5F9",borderRadius:2,marginTop:4,overflow:"hidden" }}>
-                <div style={{ height:"100%",width:`${Math.round(((stats[FREE]||0) / TOTAL_SLOTS) * 100)}%`,background:"#9CA3AF",borderRadius:2 }} />
-              </div>
             </div>
+          </div>
+        )}
+
+        {view === "admin" && (
+          <div style={{ marginTop:12 }}>
+            <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8 }}>
+              <button className="btn" onClick={() => setShowTasks(!showTasks)} style={{ background:"none",padding:0,fontSize:13,fontWeight:800,color:"#1E293B",display:"flex",alignItems:"center",gap:6 }}>
+                📋 Tareas <span style={{ fontSize:10,color:"#94A3B8",fontWeight:500 }}>({weekTasks.length})</span>
+                <span style={{ fontSize:10,color:"#94A3B8",transition:"transform 0.2s",display:"inline-block",transform:showTasks?"rotate(180deg)":"rotate(0)" }}>▼</span>
+              </button>
+            </div>
+            {showTasks && <TaskPanel tasks={tasks} clients={clients} clientMap={clientMap} weekKey={weekKey} onUpdate={updateTasks} />}
           </div>
         )}
 
@@ -1002,47 +1104,28 @@ export default function App() {
                   <button className="btn" onClick={() => setShareModal(c.id)} style={{ display:"flex",alignItems:"center",gap:4,background:`${c.color}12`,color:c.color,padding:"6px 12px",borderRadius:8,fontSize:11,fontWeight:600,border:`1px solid ${c.color}30` }}>
                     {c.icon} Enviar a {c.short}
                   </button>
-                  <button className="btn" onClick={() => exportBlockingICS(c.id)} style={{ display:"flex",alignItems:"center",gap:4,background:"#0078D415",color:"#0078D4",padding:"6px 12px",borderRadius:8,fontSize:11,fontWeight:600,border:"1px solid #0078D430" }}>
-                    🔒
-                  </button>
+                  <button className="btn" onClick={() => exportBlockingICS(c.id)} style={{ display:"flex",alignItems:"center",gap:4,background:"#0078D415",color:"#0078D4",padding:"6px 12px",borderRadius:8,fontSize:11,fontWeight:600,border:"1px solid #0078D430" }}>🔒</button>
                 </div>
               ))}
             </div>
           </div>
         )}
 
-        <div style={{ marginTop:16,padding:"8px 0",textAlign:"center",color:"#94A3B8",fontSize:9,fontWeight:500 }}>
-          Externia · Gestión de Disponibilidad v4 · {new Date().getFullYear()}
-        </div>
+        <div style={{ marginTop:16,padding:"8px 0",textAlign:"center",color:"#94A3B8",fontSize:9,fontWeight:500 }}>Externia · v5 · {new Date().getFullYear()}</div>
       </div>
 
       {showClientMgr && <ClientManager clients={clients} onSave={saveClients} onClose={() => setShowClientMgr(false)} />}
-
-      {showCalSetup && (
-        <CalendarSetup
-          clients={clients}
-          connections={calConnections}
-          onUpdate={handleMsalUpdate}
-          onClose={() => setShowCalSetup(false)}
-          msalReady={msalReady}
-          onConnect={connectAccount}
-          onDisconnect={disconnectAccount}
-          onSync={syncCalendars}
-          syncing={syncing}
-        />
-      )}
+      {showCalSetup && <CalendarSetup clients={clients} connections={calConnections} onUpdate={handleMsalUpdate} onClose={() => setShowCalSetup(false)} msalReady={msalReady} onConnect={connectAccount} onDisconnect={disconnectAccount} onSync={syncCalendars} syncing={syncing} />}
 
       {shareModal && (
         <Modal onClose={() => { setShareModal(null); setEmailField(""); setEditingEmail(false); }}>
           <div style={{ fontSize:16,fontWeight:700,color:"#1E293B",marginBottom:4 }}>✉️ Disponibilidad → {clientMap[shareModal]?.name}</div>
-          <div style={{ fontSize:11,color:"#64748B",marginBottom:14 }}>Email generado con tu disponibilidad horaria.</div>
-
+          <div style={{ fontSize:11,color:"#64748B",marginBottom:14 }}>Email con disponibilidad y tareas previstas.</div>
           <div style={{ marginBottom:12 }}>
             <label style={{ fontSize:10,fontWeight:600,color:"#475569",display:"block",marginBottom:4 }}>Para:</label>
             <input value={emailField} onChange={e => setEmailField(e.target.value)} placeholder="nombre@empresa.com"
               style={{ border:"2px solid #E2E8F0",borderRadius:8,padding:"7px 10px",fontSize:12,fontFamily:"inherit",outline:"none",width:"100%" }} />
           </div>
-
           <div style={{ marginBottom:12 }}>
             <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4 }}>
               <label style={{ fontSize:10,fontWeight:600,color:"#475569" }}>Mensaje:</label>
@@ -1052,20 +1135,15 @@ export default function App() {
             </div>
             {editingEmail ? (
               <textarea value={shareEmailText} onChange={e => setShareEmailText(e.target.value)}
-                style={{ width:"100%",minHeight:200,border:"2px solid #E2E8F0",borderRadius:10,padding:12,fontSize:12,fontFamily:"'Archivo',sans-serif",outline:"none",lineHeight:1.6,resize:"vertical" }} />
+                style={{ width:"100%",minHeight:220,border:"2px solid #E2E8F0",borderRadius:10,padding:12,fontSize:12,fontFamily:"'Archivo',sans-serif",outline:"none",lineHeight:1.6,resize:"vertical" }} />
             ) : (
-              <div style={{ background:"#F8FAFC",borderRadius:10,padding:14,maxHeight:240,overflowY:"auto",fontSize:12,color:"#334155",whiteSpace:"pre-wrap",lineHeight:1.7 }}>
-                {shareEmailText}
-              </div>
+              <div style={{ background:"#F8FAFC",borderRadius:10,padding:14,maxHeight:260,overflowY:"auto",fontSize:12,color:"#334155",whiteSpace:"pre-wrap",lineHeight:1.7 }}>{shareEmailText}</div>
             )}
-            <button className="btn" onClick={() => { setShareEmailText(getShareEmail(shareModal)); setEditingEmail(false); }}
-              style={{ marginTop:6,background:"none",color:"#94A3B8",padding:0,fontSize:10 }}>↻ Regenerar</button>
+            <button className="btn" onClick={() => { setShareEmailText(getShareEmail(shareModal)); setEditingEmail(false); }} style={{ marginTop:6,background:"none",color:"#94A3B8",padding:0,fontSize:10 }}>↻ Regenerar</button>
           </div>
-
           <div style={{ display:"flex",flexDirection:"column",gap:8 }}>
-            <a href={`mailto:${emailField ? encodeURIComponent(emailField) : ""}?subject=${encodeURIComponent(`Disponibilidad semana ${weekRange}`)}&body=${encodeURIComponent(shareEmailText)}`}
-              target="_blank" rel="noopener noreferrer"
-              style={{ display:"flex",alignItems:"center",justifyContent:"center",gap:6,background:"#0078D4",color:"white",padding:"10px",borderRadius:8,fontSize:12,fontWeight:600,textDecoration:"none" }}>
+            <a href={`mailto:${emailField?encodeURIComponent(emailField):""}?subject=${encodeURIComponent(`Disponibilidad semana ${weekRange}`)}&body=${encodeURIComponent(shareEmailText)}`}
+              target="_blank" rel="noopener noreferrer" style={{ display:"flex",alignItems:"center",justifyContent:"center",gap:6,background:"#0078D4",color:"white",padding:"10px",borderRadius:8,fontSize:12,fontWeight:600,textDecoration:"none" }}>
               📧 Abrir en Outlook / Mail
             </a>
             <div style={{ display:"flex",gap:6 }}>
