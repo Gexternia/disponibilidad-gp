@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { PublicClientApplication } from "@azure/msal-browser";
 
 const DEFAULT_CLIENTS = [
   { id: "externa", name: "Externa Events", short: "Externa", color: "#2563EB", icon: "🏢" },
@@ -24,7 +25,6 @@ const FREE = "__free__";
 const CAL_EVENT = "__cal__";
 const TOTAL_SLOTS = DAYS.length * HOURS.length;
 
-const MSAL_CDN = "https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js";
 const GRAPH_SCOPES = ["Calendars.Read"];
 const GRAPH_CALENDAR_URL = "https://graph.microsoft.com/v1.0/me/calendarView";
 
@@ -211,29 +211,15 @@ const store = {
 };
 
 let msalInstance = null;
-let msalLoaded = false;
-let msalLoadPromise = null;
 
-function loadMsal() {
-  if (msalLoadPromise) return msalLoadPromise;
-  msalLoadPromise = new Promise((resolve) => {
-    if (window.msal) { msalLoaded = true; resolve(true); return; }
-    const s = document.createElement("script");
-    s.src = MSAL_CDN;
-    s.onload = () => { msalLoaded = true; resolve(true); };
-    s.onerror = () => resolve(false);
-    document.head.appendChild(s);
-  });
-  return msalLoadPromise;
-}
-
-function initMsal(clientId, redirectUri) {
-  if (!window.msal || !clientId) return null;
+async function createMsal(clientId, redirectUri) {
+  if (!clientId) return null;
   try {
-    msalInstance = new window.msal.PublicClientApplication({
+    msalInstance = new PublicClientApplication({
       auth: { clientId, authority: "https://login.microsoftonline.com/common", redirectUri },
       cache: { cacheLocation: "localStorage", storeAuthStateInCookie: false },
     });
+    await msalInstance.initialize();
     return msalInstance;
   } catch (e) { console.error("MSAL init error:", e); return null; }
 }
@@ -499,7 +485,7 @@ function CalendarSetup({ clients, connections, onUpdate, onClose, msalReady, onC
 
       {!msalReady && saved && (
         <div style={{ background:"#FEF3C7",borderRadius:8,padding:10,fontSize:11,color:"#92400E" }}>
-          ⚠️ MSAL.js cargando... Si no funciona, recarga la página.
+          ⚠️ Inicializando MSAL... Cierra esta ventana y vuelve a abrirla. Si persiste, recarga la página (F5).
         </div>
       )}
     </Modal>
@@ -552,12 +538,9 @@ export default function App() {
   async function initMsalFromStorage() {
     const cid = store.get("gp4-azure-client-id");
     if (!cid) return;
-    const ok = await loadMsal();
-    if (!ok) return;
-    const inst = initMsal(cid, window.location.origin + window.location.pathname);
+    const inst = await createMsal(cid, window.location.origin + window.location.pathname);
     if (inst) {
       msalRef.current = inst;
-      try { await inst.initialize(); } catch {}
       setMsalReady(true);
     }
   }
@@ -565,12 +548,9 @@ export default function App() {
   const handleMsalUpdate = async () => {
     const cid = store.get("gp4-azure-client-id");
     if (!cid) return;
-    const ok = await loadMsal();
-    if (!ok) return;
-    const inst = initMsal(cid, window.location.origin + window.location.pathname);
+    const inst = await createMsal(cid, window.location.origin + window.location.pathname);
     if (inst) {
       msalRef.current = inst;
-      try { await inst.initialize(); } catch {}
       setMsalReady(true);
     }
   };
