@@ -646,6 +646,36 @@ export default function App() {
 
   const clearWeek = () => { const u = { ...weeks, [weekKey]: defaultBlocks() }; setWeeks(u); persist(u, undefined, undefined); flash("Semana limpiada"); };
 
+  const exportConfig = () => {
+    const data = { weeks, clients, templates, azureClientId: store.get("gp4-azure-client-id"), calConnections, version: "4.0" };
+    downloadFile(JSON.stringify(data, null, 2), `disponibilidad-backup-${new Date().toISOString().split("T")[0]}.json`, "application/json");
+    flash("Backup descargado ✓");
+  };
+
+  const importConfig = () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".json";
+    input.onchange = (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        try {
+          const data = JSON.parse(ev.target.result);
+          if (data.weeks) { setWeeks(data.weeks); store.set("gp4-weeks", data.weeks); }
+          if (data.clients) { setClients(data.clients); store.set("gp4-clients", data.clients); }
+          if (data.templates) { setTemplates(data.templates); store.set("gp4-templates", data.templates); }
+          if (data.azureClientId) store.set("gp4-azure-client-id", data.azureClientId);
+          if (data.calConnections) { setCalConnections(data.calConnections); store.set("gp4-cal-connections", data.calConnections); }
+          flash("✓ Configuración restaurada");
+        } catch { flash("Error: archivo no válido"); }
+      };
+      reader.readAsText(file);
+    };
+    input.click();
+  };
+
   const autoFillFromCalendar = () => {
     if (Object.keys(calEvents).length === 0) { flash("Sincroniza los calendarios primero"); return; }
     const newBlocks = { ...currentBlocks };
@@ -792,6 +822,8 @@ export default function App() {
               <button className="btn" onClick={() => setShowClientMgr(true)} style={{ background:"#E2E8F0",color:"#475569",padding:"6px 10px",borderRadius:8,fontSize:10,fontWeight:600 }}>👥</button>
               <button className="btn" onClick={exportFullICS} style={{ background:"#E2E8F0",color:"#475569",padding:"6px 10px",borderRadius:8,fontSize:10,fontWeight:600 }}>📥</button>
               <button className="btn" onClick={() => copyText(getAdminSummary())} style={{ background:"#7C3AED",color:"white",padding:"6px 10px",borderRadius:8,fontSize:10,fontWeight:600 }}>📋 Resumen</button>
+              <button className="btn" onClick={exportConfig} style={{ background:"#0F172A",color:"white",padding:"6px 10px",borderRadius:8,fontSize:10,fontWeight:600 }}>💾 Backup</button>
+              <button className="btn" onClick={importConfig} style={{ background:"#475569",color:"white",padding:"6px 10px",borderRadius:8,fontSize:10,fontWeight:600 }}>📂 Restaurar</button>
             </div>
           )}
           {isClient && (
